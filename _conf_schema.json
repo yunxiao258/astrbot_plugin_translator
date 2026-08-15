@@ -1,0 +1,12 @@
+{
+  "default_target": {
+    "description": "自动翻译时的默认目标语种（留空表示自动：中文文本译为英文，其他语种译为中文）。支持语种代码/中文名/简称，如 en、英语、英、zh、中文",
+    "type": "string",
+    "default": ""
+  },
+  "trans_max_chars": {
+    "description": "单次翻译允许的最大字符数，超长文本将被截断并在回复中提示（默认 2000）",
+    "type": "int",
+    "default": 2000
+  }
+}
