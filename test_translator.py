@@ -48,8 +48,8 @@ def reply_text(result):
 
 
 def mock_translate(plugin, calls, reply="【译文】"):
-    """把 _translate 替换为记录调用参数的假实现，返回固定文本"""
-    def fake_translate(text, src, dst):
+    """把 _translate 替换为记录调用参数的假实现，返回固定文本（async，与插件签名一致）"""
+    async def fake_translate(text, src, dst):
         calls.append((text, src, dst))
         return reply + text
     plugin._translate = fake_translate
@@ -229,13 +229,15 @@ class TestFailureFallback(unittest.TestCase):
 
     def test_translate_none_fallback(self):
         p = make_plugin()
-        p._translate = lambda text, src, dst: None
+        async def fake(text, src, dst):
+            return None
+        p._translate = fake
         result = run(p.translate_cmd(FakeEvent("/翻译 hello world")))
         self.assertIn("翻译服务暂时不可用", reply_text(result))
 
     def test_translate_exception_fallback(self):
         p = make_plugin()
-        def boom(text, src, dst):
+        async def boom(text, src, dst):
             raise RuntimeError("network down")
         p._translate = boom
         result = run(p.translate_cmd(FakeEvent("/翻译 hello")))
@@ -243,7 +245,9 @@ class TestFailureFallback(unittest.TestCase):
 
     def test_translate_empty_string_fallback(self):
         p = make_plugin()
-        p._translate = lambda text, src, dst: ""
+        async def fake(text, src, dst):
+            return ""
+        p._translate = fake
         result = run(p.translate_cmd(FakeEvent("/翻译 hello")))
         self.assertIn("翻译服务暂时不可用", reply_text(result))
 

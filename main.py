@@ -11,6 +11,7 @@
 失败返回 None 并由上层降级提示"翻译服务暂时不可用"。
 """
 
+import asyncio
 import json
 import re
 import urllib.parse
@@ -198,8 +199,8 @@ class TranslatorPlugin(Star):
             return DEFAULT_MAX_CHARS
         return v
 
-    def _translate(self, text: str, src_lang: str, dst_lang: str) -> str | None:
-        """调用翻译接口，返回译文；失败返回 None（由上层降级提示）。
+    def _translate_sync(self, text: str, src_lang: str, dst_lang: str) -> str | None:
+        """同步调用翻译接口（可被替换/测试），返回译文；失败返回 None（由上层降级提示）。
 
         默认实现：Google translate.googleapis.com 免费接口（无需 API key），
         仅使用标准库 urllib.request，国内可直连访问。
@@ -225,6 +226,10 @@ class TranslatorPlugin(Star):
         except Exception as e:  # 网络异常/解析失败等一律降级
             logger.warning(f"【{PLUGIN_NAME}】翻译请求失败: {e}")
             return None
+
+    async def _translate(self, text: str, src_lang: str, dst_lang: str) -> str | None:
+        """异步包装：网络请求在线程中执行，避免阻塞 AstrBot 事件循环"""
+        return await asyncio.to_thread(self._translate_sync, text, src_lang, dst_lang)
 
     def _invalid_direction_msg(self) -> str:
         """构造非法方向提示（含支持语种列表）"""
@@ -263,7 +268,7 @@ class TranslatorPlugin(Star):
 
         # _translate 为可替换接口，外部实现可能抛异常，统一兜底降级
         try:
-            result = self._translate(rest, src, dst)
+            result = await self._translate(rest, src, dst)
         except Exception as e:
             logger.warning(f"【{PLUGIN_NAME}】翻译接口异常: {e}")
             result = None
