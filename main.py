@@ -79,9 +79,6 @@ DIRECTION_RE = re.compile(
     r"^([\u4e00-\u9fffA-Za-z\-]{1,16})\s*[>＞→]\s*([\u4e00-\u9fffA-Za-z\-]{1,16})\s*(.*)$",
     re.S,
 )
-# 方向分隔符检测（用于区分"非法方向"与"普通文本"）
-SEPARATOR_RE = re.compile(r"[>＞→]")
-
 DEFAULT_MAX_CHARS = 2000
 
 HELP_TEXT = """🌐 翻译助手使用帮助
@@ -152,8 +149,12 @@ class TranslatorPlugin(Star):
 
     @staticmethod
     def _looks_like_direction(args: str) -> bool:
-        """是否包含方向分隔符（>／＞／→）"""
-        return bool(SEPARATOR_RE.search(args))
+        """是否命中方向结构（两侧各 ≤16 字符 + >／＞／→ 分隔符）。
+
+        仅靠分隔符判断会把「我用 > 符号」这类普通文本误报为非法方向，
+        因此要求整体结构与方向写法一致。
+        """
+        return bool(DIRECTION_RE.match(args))
 
     @staticmethod
     def _detect_lang(text: str) -> str:
