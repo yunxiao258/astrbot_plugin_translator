@@ -5,8 +5,33 @@
     "default": ""
   },
   "trans_max_chars": {
-    "description": "单次翻译允许的最大字符数，超长文本将被截断并在回复中提示（默认 2000）",
+    "description": "单段翻译的最大字符数；长文本自动按此值分段翻译后拼接（默认 2000）",
     "type": "int",
     "default": 2000
+  },
+  "trans_segment_enabled": {
+    "description": "长文是否自动分段翻译（关闭后退回截断行为）",
+    "type": "bool",
+    "default": true
+  },
+  "trans_max_segments": {
+    "description": "长文分段翻译的最大段数（1~20），超出部分截断并提示，非法值回退默认 5",
+    "type": "int",
+    "default": 5
+  },
+  "trans_cache_enabled": {
+    "description": "是否启用翻译结果缓存（相同文本与方向直接复用译文）",
+    "type": "bool",
+    "default": true
+  },
+  "trans_cache_size": {
+    "description": "翻译缓存最大条目数（1~10000），超限淘汰最早条目，非法值回退默认 500",
+    "type": "int",
+    "default": 500
+  },
+  "trans_stats_enabled": {
+    "description": "是否记录翻译统计（/翻译 统计 查看次数、语种分布与缓存命中率）",
+    "type": "bool",
+    "default": true
   }
 }

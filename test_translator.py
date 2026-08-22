@@ -257,7 +257,7 @@ class TestMaxChars(unittest.TestCase):
 
     def test_too_long_truncated(self):
         calls = []
-        p = make_plugin({"trans_max_chars": 10})
+        p = make_plugin({"trans_max_chars": 10, "trans_segment_enabled": False})
         mock_translate(p, calls)
         long_text = "a" * 30
         result = run(p.translate_cmd(FakeEvent(f"/翻译 {long_text}")))

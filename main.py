@@ -4,7 +4,11 @@
 功能：
 - `/翻译 <文本>` 自动检测语言并翻译为中文（文本为中文则翻译成英文）
 - `/翻译 英>中 <文本>` 指定翻译方向（支持语种代码/中英文名/中文简称）
+- `/翻译 检测 <文本>` 检测文本语种
+- `/翻译 统计` 查看翻译次数与缓存命中统计
 - `/翻译 帮助` 查看语种支持列表与用法
+- 长文自动分段翻译（可关），译文按序拼接
+- 翻译结果内存缓存（相同文本+方向直接复用），统计持久化
 
 翻译接口抽象为 `_translate(text, src_lang, dst_lang)`，可替换：
 默认走 Google translate.googleapis.com 免费接口（无需 API key），
@@ -13,6 +17,7 @@
 
 import asyncio
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -25,8 +30,8 @@ from astrbot.api.star import Context, Star, register
 # 插件元数据
 PLUGIN_NAME = "astrbot_plugin_translator"
 PLUGIN_AUTHOR = "云晓"
-PLUGIN_DESC = "翻译助手：中英及常见语种互译"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_DESC = "翻译助手：中英及常见语种互译（语种检测/长文分段/缓存/统计）"
+PLUGIN_VERSION = "1.1.0"
 
 # 支持的语种：标准代码 -> 中文名称
 LANGUAGES = {
@@ -80,12 +85,16 @@ DIRECTION_RE = re.compile(
     re.S,
 )
 DEFAULT_MAX_CHARS = 2000
+DEFAULT_SEGMENTS = 5  # 长文分段翻译的最大段数
+DEFAULT_CACHE_SIZE = 500  # 翻译缓存最大条目数
 
 HELP_TEXT = """🌐 翻译助手使用帮助
 ━━━━━━━━━━━━━━━━━━━━━━━
 用法：
   /翻译 <文本>             自动翻译（中文→英文，其他→中文）
   /翻译 英>中 <文本>       指定翻译方向（代码/中文全称/简称均可）
+  /翻译 检测 <文本>        检测文本语种
+  /翻译 统计               查看翻译次数与缓存命中统计
   /翻译 帮助               查看本帮助
 
 支持语种（代码 / 中文名 / 简称，如 英 英语 en）：
@@ -99,17 +108,88 @@ HELP_TEXT = """🌐 翻译助手使用帮助
   /翻译 英>中 hello world
   /翻译 英语>中文 hello world
 
-提示：文本过长会截断翻译；翻译服务异常时会提示稍后再试。"""
+提示：长文本自动分段翻译后拼接；相同内容重复翻译走缓存；翻译服务异常时会提示稍后再试。"""
 
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, PLUGIN_DESC, PLUGIN_VERSION)
 class TranslatorPlugin(Star):
     """翻译助手：中英及常见语种互译"""
 
-    def __init__(self, context: Context, config: AstrBotConfig = None):
+    def __init__(self, context: Context, config: AstrBotConfig = None, data_dir: str = None):
         super().__init__(context)
         self.config = config or {}
+        # 数据目录：默认 plugin_data/<插件名>，测试可注入临时目录
+        self.data_dir = data_dir or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "plugin_data",
+            PLUGIN_NAME,
+        )
+        os.makedirs(self.data_dir, exist_ok=True)
+
+        # 翻译缓存：(src, dst, text) -> 译文（插入序，超限淘汰最旧）
+        self._cache: dict[tuple, str] = {}
+        # 统计：总次数 / 按目标语种 / 缓存命中
+        self._stats: dict = {"total": 0, "by_dst": {}, "cache_hits": 0}
+        self._load_stats()
         logger.info(f"【{PLUGIN_NAME}】翻译助手插件初始化完成")
+
+    # ========== 统计持久化 ==========
+
+    def _stats_file(self) -> str:
+        return os.path.join(self.data_dir, "translator_stats.json")
+
+    def _load_stats(self):
+        """从磁盘加载统计；损坏/结构异常时重置，不影响运行"""
+        try:
+            path = self._stats_file()
+            if not os.path.exists(path):
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                return
+            total = raw.get("total", 0)
+            by_dst = raw.get("by_dst", {})
+            hits = raw.get("cache_hits", 0)
+            if isinstance(total, (int, float)) and total >= 0:
+                self._stats["total"] = int(total)
+            if isinstance(by_dst, dict):
+                self._stats["by_dst"] = {
+                    str(k): int(v) for k, v in by_dst.items()
+                    if isinstance(v, (int, float)) and v >= 0
+                }
+            if isinstance(hits, (int, float)) and hits >= 0:
+                self._stats["cache_hits"] = int(hits)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
+            logger.warning("【%s】统计数据损坏（%s），已重置", PLUGIN_NAME, e)
+            self._stats = {"total": 0, "by_dst": {}, "cache_hits": 0}
+
+    def _save_stats(self):
+        """保存统计到磁盘；失败仅告警不影响运行"""
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            tmp = self._stats_file() + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._stats, f, ensure_ascii=False)
+            os.replace(tmp, self._stats_file())
+        except OSError as e:
+            logger.warning("【%s】保存统计数据失败: %s", PLUGIN_NAME, e)
+
+    def _record_translation(self, dst_lang: str):
+        """记录一次成功翻译（统计开关开启时）并持久化"""
+        if not self._cfg_bool("trans_stats_enabled", True):
+            return
+        self._stats["total"] += 1
+        by = self._stats["by_dst"]
+        by[dst_lang] = by.get(dst_lang, 0) + 1
+        self._save_stats()
+
+    def _record_cache_hit(self):
+        """记录一次缓存命中（统计开关开启时）并持久化"""
+        if not self._cfg_bool("trans_stats_enabled", True):
+            return
+        self._stats["cache_hits"] += 1
+        self._save_stats()
 
     # ========== 指令处理 ==========
 
@@ -200,6 +280,81 @@ class TranslatorPlugin(Star):
             return DEFAULT_MAX_CHARS
         return v
 
+    # ========== 配置读取（脏值防御） ==========
+
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        """读取布尔配置，非 bool 值按字符串解析，无法解析时回退默认值"""
+        v = self.config.get(key, default)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return default
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        """读取整数配置，脏值回退默认值"""
+        try:
+            return int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _cache_enabled(self) -> bool:
+        return self._cfg_bool("trans_cache_enabled", True)
+
+    def _cache_limit(self) -> int:
+        """缓存上限（1~10000），脏值回退默认 500"""
+        return min(10000, max(1, self._cfg_int("trans_cache_size", DEFAULT_CACHE_SIZE)))
+
+    def _segment_enabled(self) -> bool:
+        return self._cfg_bool("trans_segment_enabled", True)
+
+    def _max_segments(self) -> int:
+        """长文分段最大段数（1~20），脏值回退默认 5"""
+        return min(20, max(1, self._cfg_int("trans_max_segments", DEFAULT_SEGMENTS)))
+
+    # ========== 缓存 ==========
+
+    def _cache_get(self, src: str, dst: str, text: str) -> str | None:
+        if not self._cache_enabled():
+            return None
+        return self._cache.get((src, dst, text))
+
+    def _cache_put(self, src: str, dst: str, text: str, result: str):
+        if not self._cache_enabled():
+            return
+        limit = self._cache_limit()
+        while len(self._cache) >= limit:
+            # 淘汰最早插入的条目
+            first = next(iter(self._cache))
+            self._cache.pop(first, None)
+        self._cache[(src, dst, text)] = result
+
+    # ========== 长文分段 ==========
+
+    @staticmethod
+    def _split_text(text: str, size: int) -> list[str]:
+        """把文本按 size 切分为若干段；优先在换行处断开，避免拆散句子"""
+        if len(text) <= size:
+            return [text]
+        segments = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= size:
+                segments.append(remaining)
+                break
+            window = remaining[: size + 1]
+            # 在窗口内找最后一个换行或句末标点作为切点
+            cut = -1
+            for sep in ("\n", "。", "！", "？", ".", "!", "?", "；", ";"):
+                pos = window.rfind(sep)
+                if pos > 0:
+                    cut = max(cut, pos + len(sep))
+            if cut <= 0:
+                cut = size
+            segments.append(remaining[:cut])
+            remaining = remaining[cut:]
+        return [s for s in segments if s]
+
     def _translate_sync(self, text: str, src_lang: str, dst_lang: str) -> str | None:
         """同步调用翻译接口（可被替换/测试），返回译文；失败返回 None（由上层降级提示）。
 
@@ -246,7 +401,7 @@ class TranslatorPlugin(Star):
         return event.chain_result([Plain(text)])
 
     async def _do_translate(self, event: AstrMessageEvent, args: str):
-        """执行翻译：解析方向 → 检测语言 → 截断校验 → 调用翻译接口"""
+        """执行翻译：解析方向 → 检测语言 → 缓存/分段翻译 → 记录统计"""
         src, dst, rest = self._parse_direction(args)
         if src is None and self._looks_like_direction(args):
             # 存在方向分隔符但语种无法识别，给出明确提示
@@ -260,30 +415,94 @@ class TranslatorPlugin(Star):
         if dst is None:
             dst = self._default_target() or ("zh" if src != "zh" else "en")
 
-        # 超长文本截断
         max_chars = self._max_chars()
         truncated = False
+        segments = [rest]
         if len(rest) > max_chars:
-            rest = rest[:max_chars]
-            truncated = True
+            if self._segment_enabled():
+                segments = self._split_text(rest, max_chars)[: self._max_segments()]
+                if "".join(segments) != rest:
+                    truncated = True  # 段数上限导致尾部被截断
+            else:
+                segments = [rest[:max_chars]]
+                truncated = True
 
-        # _translate 为可替换接口，外部实现可能抛异常，统一兜底降级
-        try:
-            result = await self._translate(rest, src, dst)
-        except Exception as e:
-            logger.warning(f"【{PLUGIN_NAME}】翻译接口异常: {e}")
-            result = None
-        if not result:
-            return self._send_text(event, "❌ 翻译服务暂时不可用，请稍后再试")
+        # 逐段翻译：优先命中缓存
+        translated_parts: list[str] = []
+        cache_hit_count = 0
+        for seg in segments:
+            cached = self._cache_get(src, dst, seg)
+            if cached is not None:
+                translated_parts.append(cached)
+                cache_hit_count += 1
+                continue
+            # _translate 为可替换接口，外部实现可能抛异常，统一兜底降级
+            try:
+                result = await self._translate(seg, src, dst)
+            except Exception as e:
+                logger.warning(f"【{PLUGIN_NAME}】翻译接口异常: {e}")
+                result = None
+            if not result:
+                return self._send_text(event, "❌ 翻译服务暂时不可用，请稍后再试")
+            self._cache_put(src, dst, seg, result)
+            translated_parts.append(result)
+
+        final_text = "".join(translated_parts) if dst == "zh" else " ".join(translated_parts)
+        if cache_hit_count:
+            self._record_cache_hit()
+        # 整体命中全部缓存时不重复计总次数？——仍计入总次数（一次翻译请求）
+        self._record_translation(dst)
 
         src_name = LANGUAGES.get(src, src)
         dst_name = LANGUAGES.get(dst, dst)
         lines = [f"🌐 翻译（{src_name} → {dst_name}）", "━━━━━━━━━━━━━━━━━━━━━"]
+        if len(segments) > 1:
+            lines.append(f"🧩 长文已分段翻译：共 {len(segments)} 段")
         if truncated:
-            lines.append(f"⚠️ 文本过长，已截取前 {max_chars} 字翻译")
+            if self._segment_enabled():
+                lines.append("⚠️ 文本过长，超出分段上限，已截取部分内容翻译")
+            else:
+                lines.append(f"⚠️ 文本过长，已截取前 {max_chars} 字翻译")
         preview = rest if len(rest) <= 120 else rest[:120] + "…"
         lines.append(f"📄 原文：{preview}")
-        lines.append(f"💬 译文：{result}")
+        lines.append(f"💬 译文：{final_text}")
+        return self._send_text(event, "\n".join(lines))
+
+    def _cmd_detect(self, event: AstrMessageEvent, args: str):
+        """/翻译 检测 <文本>：显示检测出的语种"""
+        text = args.strip()
+        if not text:
+            return self._send_text(event, "❌ 用法: /翻译 检测 <文本>")
+        code = self._detect_lang(text)
+        name = LANGUAGES.get(code, code)
+        preview = text if len(text) <= 60 else text[:60] + "…"
+        return self._send_text(
+            event,
+            f"🔍 语种检测结果\n━━━━━━━━━━━━━━━━━━━━━\n📄 文本：{preview}\n💬 语种：{name} ({code})",
+        )
+
+    def _cmd_stats(self, event: AstrMessageEvent):
+        """/翻译 统计：查看翻译次数、语种分布与缓存命中"""
+        if not self._cfg_bool("trans_stats_enabled", True):
+            return self._send_text(event, "📊 统计功能未开启（trans_stats_enabled = false）")
+        total = int(self._stats.get("total", 0))
+        hits = int(self._stats.get("cache_hits", 0))
+        by_dst = dict(self._stats.get("by_dst") or {})
+        lines = ["📊 翻译统计", "━━━━━━━━━━━━━━━━━━━━━"]
+        if total <= 0 and hits <= 0:
+            lines.append("暂无翻译记录")
+            return self._send_text(event, "\n".join(lines))
+        rate = (hits / total * 100) if total > 0 else 0.0
+        lines.append(f"🔢 累计翻译：{total} 次")
+        lines.append(f"⚡ 缓存命中：{hits} 次（{rate:.0f}%）")
+        if by_dst:
+            lines.append("🗣️ 目标语种分布：")
+            ranked = sorted(by_dst.items(), key=lambda kv: -kv[1])
+            medals = ["🥇", "🥈", "🥉"]
+            for i, (code, cnt) in enumerate(ranked[:5]):
+                name = LANGUAGES.get(code, code)
+                icon = medals[i] if i < 3 else f"{i + 1}."
+                lines.append(f"  {icon} {name}({code})：{cnt} 次")
         return self._send_text(event, "\n".join(lines))
 
     @filter.command("翻译", priority=200)
@@ -294,4 +513,9 @@ class TranslatorPlugin(Star):
             return self._send_text(event, HELP_TEXT)
         if args in ("帮助", "help", "Help", "HELP"):
             return self._send_text(event, HELP_TEXT)
+        # 子命令：检测 / 统计
+        if args.startswith("检测"):
+            return self._cmd_detect(event, args[2:])
+        if args.startswith("统计"):
+            return self._cmd_stats(event)
         return await self._do_translate(event, args)
