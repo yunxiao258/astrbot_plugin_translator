@@ -31,7 +31,7 @@ from astrbot.api.star import Context, Star, register
 PLUGIN_NAME = "astrbot_plugin_translator"
 PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "翻译助手：中英及常见语种互译（语种检测/长文分段/缓存/统计）"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.1.1"
 
 # 支持的语种：标准代码 -> 中文名称
 LANGUAGES = {
@@ -519,3 +519,13 @@ class TranslatorPlugin(Star):
         if args.startswith("统计"):
             return self._cmd_stats(event)
         return await self._do_translate(event, args)
+
+    async def terminate(self):
+        """插件卸载时释放内存缓存并按配置保存统计"""
+        try:
+            if hasattr(self, "_cache"):
+                self._cache.clear()
+            if self._cfg_bool("trans_stats_enabled", True) and self._stats.get("total", 0) > 0:
+                self._save_stats()
+        except Exception:
+            pass

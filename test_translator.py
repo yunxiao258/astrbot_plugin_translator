@@ -5,10 +5,11 @@
 """
 
 import asyncio
+import os
 import sys
 import unittest
 
-sys.path.insert(0, r"D:\astrbot\data\plugins")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astrbot_plugin_translator.main import (  # noqa: E402
     HELP_TEXT,

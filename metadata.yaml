@@ -2,6 +2,6 @@ name: astrbot_plugin_translator
 display_name: 翻译助手
 desc: 翻译助手：中英及常见语种互译（语种检测/长文分段/缓存/统计）
 help: 发送「/翻译 <文本>」自动翻译；「/翻译 英>中 <文本>」指定方向；「/翻译 检测 <文本>」检测语种；「/翻译 统计」查看翻译统计；「/翻译 帮助」查看语种列表与用法
-version: 1.1.0
+version: 1.1.1
 author: 云晓
 repo: https://github.com/yunxiao258/astrbot_plugin_translator
