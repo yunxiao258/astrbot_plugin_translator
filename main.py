@@ -31,7 +31,12 @@ from astrbot.api.star import Context, Star, register
 PLUGIN_NAME = "astrbot_plugin_translator"
 PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "翻译助手：中英及常见语种互译（语种检测/长文分段/缓存/统计）"
-PLUGIN_VERSION = "1.1.1"
+try:
+    from .hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+except ImportError:
+    from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+
+PLUGIN_VERSION = "1.2.0"
 
 # 支持的语种：标准代码 -> 中文名称
 LANGUAGES = {
@@ -113,6 +118,7 @@ HELP_TEXT = """🌐 翻译助手使用帮助
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, PLUGIN_DESC, PLUGIN_VERSION)
 class TranslatorPlugin(Star):
+    HUB_PROTOCOL_VERSION = HUB_PROTOCOL_VERSION
     """翻译助手：中英及常见语种互译"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None, data_dir: str = None):
@@ -466,6 +472,7 @@ class TranslatorPlugin(Star):
         preview = rest if len(rest) <= 120 else rest[:120] + "…"
         lines.append(f"📄 原文：{preview}")
         lines.append(f"💬 译文：{final_text}")
+        emit_hub_event(PLUGIN_NAME, "translator.translated", {"umo": str(getattr(event, "unified_msg_origin", "") or ""), "src": src, "dst": dst, "translated": final_text}, self.context)
         return self._send_text(event, "\n".join(lines))
 
     def _cmd_detect(self, event: AstrMessageEvent, args: str):
@@ -529,3 +536,25 @@ class TranslatorPlugin(Star):
                 self._save_stats()
         except Exception:
             pass
+
+    def hub_status(self) -> dict:
+        return {
+            "version": PLUGIN_VERSION,
+            "status": "online",
+            "metrics": {"累计翻译": int(self._stats.get("total", 0)), "缓存命中": int(self._stats.get("cache_hits", 0)), "缓存条目": len(self._cache)},
+            "actions": ["get_stats", "translate_text"],
+        }
+
+    async def hub_action(self, action: str, params: dict | None = None) -> dict:
+        p = params or {}
+        if action == "get_stats":
+            return {"ok": True, "data": dict(self._stats)}
+        if action == "translate_text":
+            txt = str(p.get("text", "")).strip()
+            if not txt:
+                return {"ok": False, "error": "缺少 text"}
+            src = str(p.get("src") or self._detect_lang(txt))
+            dst = str(p.get("dst") or self._default_target() or ("zh" if src != "zh" else "en"))
+            out = await self._translate(txt, src, dst)
+            return {"ok": True, "data": {"src": src, "dst": dst, "translated": out}}
+        return {"ok": False, "error": f"不支持的动作：{action}"}
